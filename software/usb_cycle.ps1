@@ -15,6 +15,10 @@ Other boards may keep VBUS on, which only re-enumerates the device: check main_l
 cycle. Every other device on the same controller drops for the off time too, so plug the Cam Link
 into a port whose controller carries nothing important. -List shows them without cycling.
 
+Close any app that has the Cam Link's video or audio open first (a capture app, or the card
+selected as a microphone). Windows vetoes the disable for it and queues the disable for the
+next reboot. The script refuses to run while any app uses a microphone or camera, unless -Force.
+
 Needs an elevated PowerShell (pnputil /disable-device).
 
 .EXAMPLE
@@ -26,8 +30,24 @@ param(
     [int]$OffSeconds = 3,
     [int]$WaitSeconds = 30,
     [string]$Match = 'VID_1209&PID_0001',
-    [switch]$List
+    [switch]$List,
+    [switch]$Force
 )
+
+function Get-CaptureUsers {
+    # Apps using a microphone or camera right now: Windows records LastUsedTimeStop = 0 for them.
+    # One of them holding the Cam Link makes audiodg.exe or the camera stack veto the disable, and
+    # Windows then queues the disable for the next reboot instead of failing.
+    $root = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore'
+    foreach ($cap in 'microphone', 'webcam') {
+        Get-ChildItem "$root\$cap" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($p.LastUsedTimeStart -and $p.LastUsedTimeStop -eq 0) {
+                "{0} ({1})" -f ($_.PSChildName -replace '#', '\'), $cap
+            }
+        }
+    }
+}
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -76,10 +96,31 @@ if ($others) {
 } else {
     Write-Host "Nothing else on this controller."
 }
+$users = @(Get-CaptureUsers)
+if ($users) {
+    Write-Host "Using a microphone or camera now (close them first, or pass -Force):"
+    $users | ForEach-Object { Write-Host "            $_" }
+}
 if ($List) { exit 0 }
+if ($users -and -not $Force) {
+    Write-Error 'An app is using a microphone or camera. A disable vetoed by it stays queued until reboot.'
+    exit 1
+}
 
+$t0 = Get-Date
 pnputil /disable-device "$ctrl" | Out-Null
-if ($LASTEXITCODE) { Write-Error "pnputil /disable-device failed ($LASTEXITCODE)."; exit 1 }
+$rc = $LASTEXITCODE
+if ($rc -eq 3010) {
+    # Vetoed: the controller keeps running, but it comes up disabled after the next reboot and
+    # pnputil refuses to touch it until then.
+    Write-Warning 'An application blocked the disable, and Windows queued it for the next reboot.'
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-PnP'; Id = 225; StartTime = $t0.AddSeconds(-5) } -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Warning $_.Message }
+    Write-Warning "After the reboot, run: pnputil /enable-device `"$ctrl`""
+    Write-Warning 'Or set ConfigFlags to 0 under HKLM\SYSTEM\CurrentControlSet\Enum\<controller id> before rebooting.'
+    exit 1
+}
+if ($rc) { Write-Error "pnputil /disable-device failed ($rc)."; exit 1 }
 Write-Host "Controller disabled, waiting $OffSeconds s."
 Start-Sleep -Seconds $OffSeconds
 pnputil /enable-device "$ctrl" | Out-Null
