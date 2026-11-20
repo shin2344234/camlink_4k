@@ -319,6 +319,35 @@ void gpif_stream_start(int video, int audio)
     gpif_running = 1;
 }
 
+/* Stream progress, polled periodically (~30ms) by the FPGA watchdog service. The PIB (producer)
+ * and UIB (consumer) socket byte counts of each started thread show whether the FPGA still
+ * produces. A thread is stuck when its producer count did not move since the last poll and the
+ * host has taken all of it (consumer count equal): the ring is empty and nothing arrives. The FPGA
+ * produces without an HDMI input too (no-signal pattern, audio silence), and a host that stops
+ * reading leaves the ring full (consumer behind), so neither reads as stuck. Seen after many
+ * capture app start/kill cycles: the host kept starting streams, video and audio both delivered
+ * nothing, and USB control requests were still serviced, so usb_alive() never failed. */
+int gpif_stream_alive(void)
+{
+    static uint32_t last_prod[2];
+    int alive = 1;
+
+    for (int thread = 0; thread < 2; thread++) {
+        uint8_t  ep = thread ? USB_DESC_EP_AUDIO : USB_DESC_EP_STREAM;
+        uint32_t prod, cons;
+        if (!gpif_running || !(gpif_threads & (1 << thread))) {
+            last_prod[thread] = 0;
+            continue;
+        }
+        prod = reg_read(DMA_PIB_SCK(thread) + FX3_SCK_COUNT);
+        cons = reg_read(DMA_UIB_SCK(ep) + FX3_SCK_COUNT);
+        if (prod == last_prod[thread] && cons == prod)
+            alive = 0;
+        last_prod[thread] = prod;
+    }
+    return alive;
+}
+
 void gpif_stream_status(uint32_t *status)
 {
     status[0] = reg_read(FX3_GPIF_WAVEFORM_CTRL_STAT);

@@ -167,13 +167,17 @@ void fpga_watchdog_service(void)
 {
     static uint32_t calls;
     static uint8_t  dead;
+    static uint8_t  stuck;
     /* Main loop measured at ~285k iterations/s, idle and streaming 1080p60: a check every 8192
      * calls is ~35/s (every 65536 was ~4.4/s, and 75 checks took ~17s instead of ~3s). */
     if (heartbeat_on && (++calls & 0x1fff) == 0) {
         /* USB dead for ~3s (100 checks, e.g. host gave up on the device or setups unserviced):
          * heartbeat stopped, the FPGA resets the FX3 (the main loop can be alive with a dead USB). */
         dead = usb_alive() ? 0 : (dead < 255 ? dead + 1 : dead);
-        if (dead > 100)
+        /* A started stream producing nothing for ~5s (175 checks, longer than an HDMI mode switch
+         * settles): same reset, USB control can still be serviced in that state. */
+        stuck = gpif_stream_alive() ? 0 : (stuck < 255 ? stuck + 1 : stuck);
+        if (dead > 100 || stuck > 175)
             return;
         heartbeat_level ^= 1;
         gpio_set(HEARTBEAT_GPIO, heartbeat_level);
