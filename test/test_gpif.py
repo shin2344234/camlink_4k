@@ -272,6 +272,54 @@ def test_gpif_video_drain():
     assert not any((w >> 16) == 0xdead for w in words)
     assert words[1:64] == [0x1000 + i for i in range(1, 64)]
 
+def test_gpif_video_disable_mid_burst():
+    # Video stopped while audio keeps running: the sources stop mid-payload and the firmware turns
+    # the FPGA video thread off. The burst must be abandoned: waiting in BURST for the rest of the
+    # payload starved audio until a full GPIF restart (hardware: no audio packet after the video
+    # stop, starve cycles counting at the PCLK rate).
+    dut   = DUT()
+    fx3   = FX3Model(dut)
+    audio = [0xa0000000 + i for i in range(48*4)]
+    def video_gen():
+        yield dut.gpif.enable.eq(1)
+        yield dut.gpif.flag_invert.eq(1)
+        yield dut.gpif.head_lead.eq(4)
+        yield dut.gpif.audio_enable.eq(1)
+        yield dut.gpif.audio_lead.eq(8)
+        yield dut.gpif.audio_batch.eq(1)
+        yield dut.gpif.burst.eq(64)
+        yield dut.gpif.guard.eq(8)
+        yield dut.gpif.switch_guard.eq(16)
+        yield dut.gpif.eop_data.eq(0x1000)
+        for i in range(20):
+            yield dut.gpif.sink.valid.eq(1)
+            yield dut.gpif.sink.data.eq(0x1000 + i)
+            yield dut.gpif.sink.last.eq(0)
+            yield
+            while not (yield dut.gpif.sink.ready):
+                yield
+        yield dut.gpif.sink.valid.eq(0)
+        for _ in range(100):
+            yield
+        yield dut.gpif.enable.eq(0)
+    def audio_gen():
+        for _ in range(300):
+            yield
+        for a in audio + [0xdeadbeef]:
+            yield dut.gpif.audio_sink.valid.eq(1)
+            yield dut.gpif.audio_sink.data.eq(a)
+            yield
+            yield dut.gpif.audio_sink.valid.eq(0)
+            for _ in range(7):
+                yield
+    def timeout():
+        for _ in range(6000):
+            yield
+    run_simulation(dut, {"sys": [video_gen(), audio_gen(), timeout()], "gpif": [fx3.run()]},
+        clocks={"sys": 10, "gpif": 10, "gpif_cdc": 10})
+    assert fx3.errors == []
+    assert fx3.words(1)[1:len(audio)] == audio[1:]
+
 def test_gpif_first_word():
     # Streaming logic in reset (video disabled) at the FX3 DMA start: the captured first word is
     # the next video word (next UVC header word), so the first payload is intact.

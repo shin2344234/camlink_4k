@@ -322,10 +322,17 @@ class GPIFStreamer(LiteXModule):
                 head_count.eq(head_count + 1),
             )
         ]
+        # Video disabled mid-burst (a video stop with audio running: the sources stop mid-payload):
+        # the burst is abandoned, the firmware aborts the FX3 thread 0 DMA. Waiting for the rest of
+        # the payload starved audio until a full restart, and a video restart then continued the
+        # old burst count (bursts no longer aligned on payloads).
         fsm.act("BURST",
-            valid.eq(head_valid),
-            fifo.source.ready.eq(head_valid),
-            If(head_valid,
+            valid.eq(head_valid & enable),
+            fifo.source.ready.eq(head_valid & enable),
+            If(~enable,
+                NextValue(gcount, 0),
+                NextState("GUARD"),
+            ).Elif(head_valid,
                 NextValue(count, count + 1),
                 If(count == (burst - 1),
                     NextValue(gcount, 0),
