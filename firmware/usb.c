@@ -20,6 +20,15 @@
 static usb_setup_cb   usb_setup_callback;
 static enum usb_speed usb_speed = USB_HIGH_SPEED;
 
+/* Egress packet size of each IN endpoint, as configured. A read of EEPM_ENDPOINT[n] sometimes
+ * returns the live word of the endpoint that is streaming instead (measured about 1 in 300 reads
+ * of EP0's entry while video runs, giving 1024 or 192 in place of 512). The flushes used to
+ * read-modify-write the register and stored that wrong size. With a wrong EP0 packet size, every
+ * EP0 IN reply longer than one packet fails and its leftover packets stay queued, so each later
+ * reply returns an earlier request's data until the FX3 is reset. The flushes now write the
+ * stored size. */
+static uint16_t usb_eepm_pktsize[16];
+
 enum usb_speed usb_get_speed(void)
 {
     return usb_speed;
@@ -116,9 +125,9 @@ static void usb_ep0_flush(void)
 {
     dma_abort_socket(DMA_UIB_SCK(0));
     dma_abort_socket(DMA_UIBIN_SCK(0));
-    reg_set(FX3_EEPM_ENDPOINT, FX3_EEPM_ENDPOINT_SOCKET_FLUSH);
+    reg_write(FX3_EEPM_ENDPOINT, FX3_EEPM_ENDPOINT_SOCKET_FLUSH | usb_eepm_pktsize[0]);
     delay_us(10);
-    reg_clear(FX3_EEPM_ENDPOINT, FX3_EEPM_ENDPOINT_SOCKET_FLUSH);
+    reg_write(FX3_EEPM_ENDPOINT, usb_eepm_pktsize[0]);
 }
 
 /* Connection ------------------------------------------------------------------------------------ */
@@ -216,6 +225,7 @@ static void usb_connect_super_speed(void)
     usb_phy_write(0x0030, 0x00c0);
     usb_phy_write(0x1010, 0x0080);
 
+    usb_eepm_pktsize[0] = 512;
     reg_write(FX3_EEPM_ENDPOINT + 0, 512UL << FX3_EEPM_ENDPOINT_PACKET_SIZE_SHIFT);
     reg_write(FX3_IEPM_ENDPOINT + 0, 512UL << FX3_IEPM_ENDPOINT_PACKET_SIZE_SHIFT);
 }
@@ -482,6 +492,7 @@ void usb_enable_in_ep(uint8_t ep, enum usb_ep_type type, uint16_t pktsize, uint8
         ((pktsize << FX3_DEV_EPI_CS_PAYLOAD_SHIFT) & FX3_DEV_EPI_CS_PAYLOAD_MASK));
 
     /* Endpoint manager. */
+    usb_eepm_pktsize[ep & 15] = pktsize & FX3_EEPM_ENDPOINT_PACKET_SIZE_MASK;
     reg_write(FX3_EEPM_ENDPOINT + (ep << 2),
         (pktsize << FX3_EEPM_ENDPOINT_PACKET_SIZE_SHIFT) & FX3_EEPM_ENDPOINT_PACKET_SIZE_MASK);
 }
@@ -513,9 +524,10 @@ void usb_reset_in_ep(uint8_t ep)
 
 void usb_flush_in_ep(uint8_t ep)
 {
-    reg_set(FX3_EEPM_ENDPOINT + (ep << 2), FX3_EEPM_ENDPOINT_SOCKET_FLUSH);
+    reg_write(FX3_EEPM_ENDPOINT + (ep << 2),
+        FX3_EEPM_ENDPOINT_SOCKET_FLUSH | usb_eepm_pktsize[ep & 15]);
     delay_us(5);
-    reg_clear(FX3_EEPM_ENDPOINT + (ep << 2), FX3_EEPM_ENDPOINT_SOCKET_FLUSH);
+    reg_write(FX3_EEPM_ENDPOINT + (ep << 2), usb_eepm_pktsize[ep & 15]);
 }
 
 /* Init ------------------------------------------------------------------------------------------ */
@@ -582,6 +594,7 @@ void usb_init(usb_setup_cb cb)
         FX3_DEV_EPI_CS_VALID | (64UL << FX3_DEV_EPI_CS_PAYLOAD_SHIFT));
     reg_write(FX3_DEV_EPO_CS + 0,
         FX3_DEV_EPO_CS_VALID | (64UL << FX3_DEV_EPO_CS_PAYLOAD_SHIFT));
+    usb_eepm_pktsize[0] = 64;
     reg_write(FX3_EEPM_ENDPOINT + 0, 64UL << FX3_EEPM_ENDPOINT_PACKET_SIZE_SHIFT);
     reg_write(FX3_IEPM_ENDPOINT + 0, 64UL << FX3_IEPM_ENDPOINT_PACKET_SIZE_SHIFT);
 
